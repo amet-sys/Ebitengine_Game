@@ -1,7 +1,7 @@
 package main
 
 import (
-	"log"
+	"image"
 	"math"
 	"time"
 )
@@ -27,26 +27,51 @@ type Player struct {
 	lastAttackTime  time.Time
 
 	//Уровень здоровья
-	health         int
-	maxHealth      int
-	damageQueue    []int // Очередь полученного урона
-	lastDamageTime time.Time
+	health          int
+	maxHealth       int
+	damageQueue     []int // Очередь полученного урона
+	lastDamageTime  time.Time
+	invulnerable    bool          // Флаг неуязвимости
+	invulnStartTime time.Time     // Время начала неуязвимости
+	invulnDuration  time.Duration // Длительность неуязвимости
+	blinkTimer      time.Duration // Таймер мигания
+	visible         bool          // Видимость при мигании
 }
 
 func NewPlayer() *Player {
 	return &Player{
-		x:         WinWidth / 2,
-		y:         WinHeight / 2,
-		angle:     MaxAngle * 3 / 4,
-		state:     "standing",
-		direction: "forward",
-		health:    100,
-		maxHealth: 100,
+		x:              WinWidth / 2,
+		y:              WinHeight / 2,
+		angle:          MaxAngle * 3 / 4,
+		state:          "standing",
+		direction:      "forward",
+		health:         100,
+		maxHealth:      100,
+		invulnerable:   false,
+		invulnDuration: PlayerInvulnDuration, // Константа из consts.go
+		visible:        true,
 	}
 }
 
 func (p *Player) Update() {
 	now := time.Now()
+
+	// Обновление статуса неуязвимости
+	if p.invulnerable && now.Sub(p.invulnStartTime) > p.invulnDuration {
+		p.invulnerable = false
+		p.visible = true
+	}
+
+	// Мигание при неуязвимости
+	if p.invulnerable {
+		p.blinkTimer -= time.Since(p.lastDamageTime)
+		if p.blinkTimer <= 0 {
+			p.visible = !p.visible
+			p.blinkTimer = PlayerBlinkInterval // Константа из consts.go
+		}
+	}
+
+	p.lastDamageTime = now
 
 	// Обновление анимации (только если не атакуем)
 	if !p.attacking && now.Sub(p.animLastUpdate) > time.Second/time.Duration(AnimationFPS) {
@@ -175,13 +200,8 @@ func (p *Player) clampPosition() {
 	charWidth := float64(CharacterSprites[0].Bounds().Dx()) * CharScale
 	charHeight := float64(CharacterSprites[0].Bounds().Dy()) * CharScale
 
-	// Добавьте отладочный вывод
-	log.Printf("Before clamp: X:%.2f Y:%.2f", p.x, p.y)
-
 	p.x = clampFloat(p.x, 0, float64(WinWidth)-charWidth)
 	p.y = clampFloat(p.y, 0, float64(WinHeight)-charHeight)
-
-	log.Printf("After clamp: X:%.2f Y:%.2f", p.x, p.y)
 }
 
 // Вспомогательные функции
@@ -209,18 +229,66 @@ func (p *Player) SpriteWidth() int {
 	return SpriteWidth
 }
 
-func (p *Player) TakeDamage(amount int) {
-	p.health -= amount
-	if p.health < 0 {
-		p.health = 0
-	}
-	p.damageQueue = append(p.damageQueue, amount)
-	p.lastDamageTime = time.Now()
-}
-
 func (p *Player) Heal(amount int) {
 	p.health += amount
 	if p.health > p.maxHealth {
 		p.health = p.maxHealth
 	}
+}
+
+func (p *Player) TakeDamage(amount int) {
+	if p.invulnerable || p.health <= 0 {
+		return
+	}
+
+	p.health -= amount
+	p.lastDamageTime = time.Now()
+	p.activateInvulnerability() // Активируем неуязвимость
+
+	// Визуальный эффект
+	p.blinkTimer = 0
+	p.visible = false // Начинаем с невидимости для мгновенной обратной связи
+
+	if p.health <= 0 {
+		p.die()
+	}
+}
+
+func (p *Player) activateInvulnerability() {
+	p.invulnerable = true
+	p.invulnStartTime = time.Now()
+	p.visible = true
+	p.blinkTimer = 0
+}
+
+func (p *Player) die() {
+	p.health = 0
+	p.visible = false
+	// Дополнительные действия при смерти
+}
+
+func (p *Player) GetDrawOpacity() float64 {
+	if !p.invulnerable {
+		return 1.0
+	}
+	elapsed := time.Since(p.invulnStartTime).Seconds()
+	progress := elapsed / p.invulnDuration.Seconds()
+	return 0.3 + 0.7*math.Abs(math.Sin(progress*math.Pi*10))
+}
+
+func (p *Player) GetCollisionRect() image.Rectangle {
+	width := int(math.Round(float64(SpriteWidth * CharScale)))
+	height := int(math.Round(float64(SpriteHeight * CharScale)))
+
+	// Можно сделать хитбокс меньше спрайта для более честного геймплея
+	hitboxReduction := 4
+	width -= hitboxReduction * 2
+	height -= hitboxReduction * 2
+
+	return image.Rect(
+		int(p.x)+hitboxReduction,
+		int(p.y)+hitboxReduction,
+		int(p.x)+width+hitboxReduction,
+		int(p.y)+height+hitboxReduction,
+	)
 }

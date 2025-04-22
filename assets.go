@@ -110,3 +110,26 @@ func LoadUIResources() {
 		heartBroken.Fill(color.RGBA{100, 0, 0, 255})
 	}
 }
+
+func (g *Game) LoadEnemySprites() {
+	// Пример загрузки спрайтов врагов
+	// В реальном коде нужно загружать соответствующие изображения
+	for i := range g.levels {
+		for j := range g.levels[i].Enemies {
+			switch g.levels[i].Enemies[j].Type {
+			case "goblin":
+				// Загружаем спрайт гоблина
+				g.levels[i].Enemies[j].Sprite = createColoredRect(color.RGBA{255, 0, 0, 255})
+			case "bat":
+				// Загружаем спрайт летучей мыши
+				g.levels[i].Enemies[j].Sprite = createColoredRect(color.RGBA{150, 0, 0, 255})
+			case "skeleton":
+				// Загружаем спрайт скелета
+				g.levels[i].Enemies[j].Sprite = createColoredRect(color.RGBA{200, 200, 200, 255})
+			default:
+				// Заглушка по умолчанию
+				g.levels[i].Enemies[j].Sprite = createColoredRect(color.RGBA{255, 0, 0, 255})
+			}
+		}
+	}
+}

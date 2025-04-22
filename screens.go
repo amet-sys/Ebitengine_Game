@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"image/color"
+	"log"
 	"math"
 	"strconv"
 	"time"
@@ -27,7 +28,6 @@ func NewScreenManager() *ScreenManager {
 }
 
 func (g *Game) Draw(screen *ebiten.Image) {
-	// Инициализация ScreenManager если еще не создан
 	if g.screenManager == nil {
 		g.screenManager = NewScreenManager()
 	}
@@ -45,27 +45,197 @@ func (g *Game) Draw(screen *ebiten.Image) {
 }
 
 func (g *Game) drawPlaying(screen *ebiten.Image) {
-	// Эффект красного мигания при получении урона
 	if time.Since(g.player.lastDamageTime) < time.Second/4 {
 		screen.Fill(color.RGBA{255, 0, 0, 64})
 	} else {
 		screen.Fill(color.RGBA{0xFA, 0xF8, 0xEF, 0xFF})
 	}
-	screen.Fill(color.RGBA{0xFA, 0xF8, 0xEF, 0xFF})
 	g.drawWorld(screen)
 	g.drawPlayer(screen)
 	g.drawUI(screen)
-	g.drawHealthHearts(screen) // Заменяем drawHealthBar на drawHealthHearts
+	g.drawHealthHearts(screen)
 
 	if g.screenManager.debug {
 		g.drawDebugInfo(screen)
 	}
 }
 
+func (g *Game) drawWorld(screen *ebiten.Image) {
+	if len(g.levels) == 0 || g.currentLevel >= len(g.levels) {
+		ebitenutil.DebugPrint(screen, "No levels loaded!")
+		return
+	}
+
+	level := g.levels[g.currentLevel]
+
+	// Если уровень загружен из Tiled
+	if level.TiledMap != nil {
+		g.drawTiledLevel(screen, level)
+		return
+	}
+
+	// Если у нас нет TiledMap, но есть старая структура Map
+	if level.Map == nil || len(level.Map) == 0 {
+		ebitenutil.DebugPrint(screen, "Level map is empty!")
+		return
+	}
+
+	// Старая отрисовка для сгенерированных уровней
+	for y := 0; y < len(level.Map); y++ {
+		if len(level.Map[y]) == 0 {
+			continue
+		}
+
+		for x := 0; x < len(level.Map[y]); x++ {
+			op := &ebiten.DrawImageOptions{}
+			op.GeoM.Translate(float64(x*tileSize), float64(y*tileSize))
+
+			var tileImg *ebiten.Image
+			switch level.Map[y][x] {
+			case TileGrass:
+				tileImg = createColoredRect(color.RGBA{100, 200, 50, 255})
+			case TileWater:
+				tileImg = createColoredRect(color.RGBA{50, 100, 200, 255})
+			case TileTree:
+				tileImg = createColoredRect(color.RGBA{0, 100, 0, 255})
+			default:
+				tileImg = createColoredRect(color.RGBA{200, 200, 200, 255})
+			}
+			screen.DrawImage(tileImg, op)
+		}
+	}
+
+	g.drawEnemies(screen)
+}
+
+func (g *Game) drawTiledLevel(screen *ebiten.Image, level Level) {
+	if level.TiledMap == nil {
+		return
+	}
+
+	// Сначала рисуем тайловые слои
+	for _, layer := range level.TiledMap.Layers {
+		if layer.Type == "tilelayer" && layer.Visible {
+			g.drawTileLayer(screen, level, layer)
+		}
+	}
+
+	// Затем рисуем объекты
+	for _, layer := range level.TiledMap.Layers {
+		if layer.Type == "objectgroup" && layer.Visible {
+			g.drawObjectLayer(screen, level, layer)
+		}
+	}
+}
+
+func (g *Game) drawTileLayer(screen *ebiten.Image, level Level, layer Layer) {
+	for y := 0; y < layer.Height; y++ {
+		for x := 0; x < layer.Width; x++ {
+			idx := x + y*layer.Width
+			if idx >= len(layer.Data) {
+				continue
+			}
+
+			tileID := layer.Data[idx]
+			if tileID == 0 {
+				continue // Пропускаем пустые тайлы
+			}
+
+			if tileImg, ok := level.TileImages[tileID]; ok {
+				op := &ebiten.DrawImageOptions{}
+				op.GeoM.Translate(
+					float64(x*level.TiledMap.TileWidth),
+					float64(y*level.TiledMap.TileHeight),
+				)
+				screen.DrawImage(tileImg, op)
+			} else {
+				// Отладочная отрисовка для отсутствующих тайлов
+				ebitenutil.DrawRect(
+					screen,
+					float64(x*level.TiledMap.TileWidth),
+					float64(y*level.TiledMap.TileHeight),
+					float64(level.TiledMap.TileWidth),
+					float64(level.TiledMap.TileHeight),
+					color.RGBA{255, 0, 0, 128},
+				)
+			}
+		}
+	}
+}
+
+func (g *Game) drawObjectLayer(screen *ebiten.Image, level Level, layer Layer) {
+	for _, obj := range layer.Objects {
+		if obj.GID == 0 {
+			continue
+		}
+
+		tileImg, ok := level.TileImages[obj.GID]
+		if !ok {
+			log.Printf("Tile with GID %d not found", obj.GID)
+			continue
+		}
+
+		op := &ebiten.DrawImageOptions{}
+
+		// Масштабирование объекта (128x128) к размеру тайла (32x32)
+		scaleX := obj.Width / float64(tileImg.Bounds().Dx())
+		scaleY := obj.Height / float64(tileImg.Bounds().Dy())
+		op.GeoM.Scale(scaleX, scaleY)
+
+		// Позиционирование с учетом центра объекта
+		op.GeoM.Translate(obj.X, obj.Y)
+
+		screen.DrawImage(tileImg, op)
+	}
+}
+
+func (g *Game) isColliding(player *Player, enemy Enemy) bool {
+	playerRect := player.GetCollisionRect()
+	enemyRect := enemy.GetCollisionRect()
+	return playerRect.Overlaps(enemyRect)
+}
+
+func (g *Game) drawEnemies(screen *ebiten.Image) {
+	if len(g.levels) == 0 || g.currentLevel >= len(g.levels) {
+		return
+	}
+
+	for _, enemy := range g.levels[g.currentLevel].Enemies {
+		// Отрисовка врага
+		op := &ebiten.DrawImageOptions{}
+		op.GeoM.Translate(enemy.Position.X, enemy.Position.Y)
+
+		// Проверка столкновения (для дебага)
+		if g.player != nil && g.isColliding(g.player, enemy) {
+			// Подсвечиваем врага при столкновении
+			ebitenutil.DrawRect(screen, enemy.Position.X, enemy.Position.Y,
+				EnemySpriteWidth, EnemySpriteHeight, color.RGBA{255, 0, 0, 128})
+		}
+
+		// Рисуем спрайт врага, если он есть
+		if enemy.Sprite != nil {
+			screen.DrawImage(enemy.Sprite, op)
+		} else {
+			// Рисуем красный квадрат как заглушку
+			ebitenutil.DrawRect(screen, enemy.Position.X, enemy.Position.Y,
+				EnemySpriteWidth, EnemySpriteHeight, color.RGBA{255, 0, 0, 255})
+		}
+	}
+}
+
+func createColoredRect(clr color.Color) *ebiten.Image {
+	img := ebiten.NewImage(tileSize, tileSize)
+	img.Fill(clr)
+	return img
+}
+
 func (g *Game) drawPlayer(screen *ebiten.Image) {
+	if g.player == nil || !g.player.visible {
+		return
+	}
+
 	sprite := g.getCurrentPlayerSprite()
 	if sprite == nil {
-		// Рисуем красный квадрат как заглушку, если спрайт не найден
 		ebitenutil.DrawRect(screen, g.player.x, g.player.y, 32, 32, color.RGBA{255, 0, 0, 255})
 		return
 	}
@@ -74,21 +244,24 @@ func (g *Game) drawPlayer(screen *ebiten.Image) {
 	op.GeoM.Scale(CharScale, CharScale)
 	op.GeoM.Translate(g.player.x, g.player.y)
 
+	if g.player.invulnerable {
+		op.ColorM.Scale(1, 1, 1, g.player.GetDrawOpacity())
+	}
+
 	screen.DrawImage(sprite, op)
 }
 
 func (g *Game) drawHealthHearts(screen *ebiten.Image) {
 	const (
-		displayHeartSize = 48.0 // Желаемый размер отображения сердца
-		spacing          = 15.0 // Расстояние между сердцами
-		topMargin        = 20.0 // Отступ сверху
-		rightMargin      = 50.0 // Отступ справа
+		displayHeartSize = 48.0
+		spacing          = 15.0
+		topMargin        = 20.0
+		rightMargin      = 50.0
 	)
 
 	fullHearts := g.player.health / 20
 	totalHearts := g.player.maxHealth / 20
 
-	// Обработка поврежденных сердец
 	damagedHearts := 0
 	if len(g.player.damageQueue) > 0 {
 		totalDamage := 0
@@ -98,23 +271,17 @@ func (g *Game) drawHealthHearts(screen *ebiten.Image) {
 		damagedHearts = (g.player.health+totalDamage)/20 - fullHearts
 	}
 
-	// Рисуем сердца справа налево
 	for i := totalHearts - 1; i >= 0; i-- {
 		op := &ebiten.DrawImageOptions{}
-
-		// Масштабирование изображения сердца до нужного размера
 		scale := displayHeartSize / float64(heartFull.Bounds().Dx())
 		op.GeoM.Scale(scale, scale)
-
-		// Позиция рассчитывается от правого края с учетом отступа
 		posX := float64(WinWidth) - rightMargin - float64(totalHearts-1-i)*(displayHeartSize+spacing)
 		posY := topMargin
 		op.GeoM.Translate(posX, posY)
 
 		switch {
 		case i >= fullHearts+damagedHearts:
-			continue // Пропускаем потерянные сердца
-
+			continue
 		case i >= fullHearts:
 			timeSinceDamage := time.Since(g.player.lastDamageTime)
 			if timeSinceDamage < time.Second {
@@ -123,22 +290,31 @@ func (g *Game) drawHealthHearts(screen *ebiten.Image) {
 				}
 				screen.DrawImage(heartBroken, op)
 			}
-
 		default:
 			screen.DrawImage(heartFull, op)
 		}
 	}
 
-	// Отображение текста здоровья (черный цвет)
+	// Индикатор неуязвимости
+	if g.player != nil && g.player.invulnerable {
+		remaining := g.player.invulnDuration.Seconds() - time.Since(g.player.invulnStartTime).Seconds()
+		invulnText := fmt.Sprintf("Invuln: %.1fs", math.Max(0, remaining))
+		text.Draw(screen, invulnText, g.screenManager.fontFace,
+			WinWidth-150, 30, color.NRGBA{255, 255, 0, 255})
+	}
+
 	healthText := fmt.Sprintf("%d/%d", g.player.health, g.player.maxHealth)
-	textColor := color.RGBA{0, 0, 0, 255}
+	textColor := color.NRGBA{0, 0, 0, 255}
 	textX := int(float64(WinWidth) - rightMargin - float64(totalHearts)*1.5*spacing)
 	textY := int(math.Round(float64(topMargin) / 1.8))
-	// Альтернативный вариант, если нет доступа к оригинальному шрифту
 	bigFont := text.FaceWithLineHeight(g.screenManager.fontFace, float64(g.screenManager.fontFace.Metrics().Height*3))
 	text.Draw(screen, healthText, bigFont, textX, textY, textColor)
-
 }
+
+// Остальные методы остаются без изменений
+// ... (getCurrentPlayerSprite, getRunSprite, getIdleSprite, getAttackSprite)
+// ... (drawUI, drawDebugInfo, drawMainMenu, drawGameOver, drawDefaultScreen)
+// ... (formatFloat, formatInt)
 
 func (g *Game) getCurrentPlayerSprite() *ebiten.Image {
 	// Проверяем, что все спрайты загружены
@@ -205,30 +381,8 @@ func (g *Game) getAttackSprite() *ebiten.Image {
 	return CharacterSprites[0]
 }
 
-func (g *Game) drawWorld(screen *ebiten.Image) {
-	// Фон и окружение
-}
-
 func (g *Game) drawUI(screen *ebiten.Image) {
 	// Элементы интерфейса
-}
-
-func (g *Game) drawDebugInfo(screen *ebiten.Image) {
-	debugText := []string{
-		"State: " + g.player.state,
-		"Direction: " + g.player.direction,
-		fmt.Sprintf("Position: X:%.2f Y:%.2f", g.player.x, g.player.y),
-		fmt.Sprintf("Angle: %d/%d", g.player.angle, MaxAngle),
-		fmt.Sprintf("Frame: %d", g.player.animFrame),
-	}
-
-	if g.player.attacking {
-		debugText = append(debugText, "Attacking! Frame: "+formatInt(g.player.attackFrame))
-	}
-
-	for i, line := range debugText {
-		text.Draw(screen, line, g.screenManager.fontFace, 10, 20+i*16, color.White)
-	}
 }
 
 func (g *Game) drawMainMenu(screen *ebiten.Image) {
@@ -254,4 +408,29 @@ func formatFloat(f float64) string {
 
 func formatInt(i int) string {
 	return strconv.Itoa(i)
+}
+
+func (g *Game) drawDebugInfo(screen *ebiten.Image) {
+	if len(g.levels) == 0 || g.currentLevel >= len(g.levels) {
+		return
+	}
+
+	level := g.levels[g.currentLevel]
+	if level.TiledMap == nil {
+		return
+	}
+
+	debugText := []string{
+		fmt.Sprintf("Layers: %d", len(level.TiledMap.Layers)),
+	}
+
+	for i, layer := range level.TiledMap.Layers {
+		debugText = append(debugText,
+			fmt.Sprintf("Layer %d: %s (%s, visible: %v)",
+				i, layer.Name, layer.Type, layer.Visible))
+	}
+
+	for i, line := range debugText {
+		text.Draw(screen, line, g.screenManager.fontFace, 10, 20+i*16, color.White)
+	}
 }
